@@ -1,161 +1,225 @@
-// src/UploadPitch.js
-import { useRef, useState } from "react"; // React hooks
+import { useRef, useState } from "react";
 
-// Convert Float32Array [-1..1] to 16-bit PCM
+/** ====== CONFIG: set your fixed Madhya Sa frequency here ====== */
+const SA_FREQ = 240; // Hz (change later if you like)
+
+/** ====== WAV helpers (unchanged) ====== */
 function floatTo16BitPCM(float32Array) {
-  const buffer = new ArrayBuffer(float32Array.length * 2); // 2 bytes per sample
-  const view = new DataView(buffer); // DataView to set 16-bit values
-  let offset = 0; // byte offset
+  const buffer = new ArrayBuffer(float32Array.length * 2);
+  const view = new DataView(buffer);
+  let offset = 0;
   for (let i = 0; i < float32Array.length; i++, offset += 2) {
-    // 2 bytes per sample
-    let s = Math.max(-1, Math.min(1, float32Array[i])); // clamp
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true); // little-endian
+    let s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
-  return buffer; // return ArrayBuffer
+  return buffer;
 }
-
-// Make a minimal mono WAV (16-bit PCM)
-function encodeWavMono(samplesFloat32, sampleRate) {
-  // samplesFloat32: Float32Array
-  const pcmBuffer = floatTo16BitPCM(samplesFloat32); // Convert to 16-bit PCM
-  const wavBuffer = new ArrayBuffer(44 + pcmBuffer.byteLength); // WAV header is 44 bytes
-  const view = new DataView(wavBuffer); // DataView to set header fields
-
-  // RIFF header
-  writeString(view, 0, "RIFF"); // ChunkID
-  view.setUint32(4, 36 + pcmBuffer.byteLength, true); // ChunkSize
-  writeString(view, 8, "WAVE"); // Format
-
-  // fmt  subchunk
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true); // PCM
-  view.setUint16(20, 1, true); // PCM format
-  view.setUint16(22, 1, true); // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate (mono, 16-bit)
-  view.setUint16(32, 2, true); // block align
-  view.setUint16(34, 16, true); // bits per sample
-
-  // data subchunk
-  writeString(view, 36, "data"); // Subchunk2ID
-  view.setUint32(40, pcmBuffer.byteLength, true); // Subchunk2Size
-
-  // copy PCM
-  new Uint8Array(wavBuffer, 44).set(new Uint8Array(pcmBuffer)); // copy PCM data after header
-  return new Blob([wavBuffer], { type: "audio/wav" }); // return WAV as Blob
-}
-
 function writeString(view, offset, text) {
-  // helper to write ASCII strings to DataView
-  for (let i = 0; i < text.length; i++) {
-    // for each character
-    view.setUint8(offset + i, text.charCodeAt(i)); // write char code
+  for (let i = 0; i < text.length; i++)
+    view.setUint8(offset + i, text.charCodeAt(i));
+}
+function encodeWavMono(samplesFloat32, sampleRate) {
+  const pcmBuffer = floatTo16BitPCM(samplesFloat32);
+  const wavBuffer = new ArrayBuffer(44 + pcmBuffer.byteLength);
+  const view = new DataView(wavBuffer);
+  writeString(view, 0, "RIFF");
+  view.setUint32(4, 36 + pcmBuffer.byteLength, true);
+  writeString(view, 8, "WAVE");
+  writeString(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, "data");
+  view.setUint32(40, pcmBuffer.byteLength, true);
+  new Uint8Array(wavBuffer, 44).set(new Uint8Array(pcmBuffer));
+  return new Blob([wavBuffer], { type: "audio/wav" });
+}
+
+/** ====== Carnatic mapping ======
+ * 12 swarasthanas per octave (just-intonation-ish ratios relative to Sa)
+ * You can tweak these later if you prefer a different tuning.
+ */
+const SWARAS = [
+  { name: "Sa", ratio: 1.0 },
+  { name: "Ri1", ratio: 16 / 15 },
+  { name: "Ri2", ratio: 9 / 8 },
+  { name: "Ga2", ratio: 5 / 4 },
+  { name: "Ga3", ratio: 6 / 5 },
+  { name: "Ma1", ratio: 4 / 3 },
+  { name: "Ma2", ratio: 45 / 32 },
+  { name: "Pa", ratio: 3 / 2 },
+  { name: "Da1", ratio: 8 / 5 },
+  { name: "Da2", ratio: 5 / 3 },
+  { name: "Ni2", ratio: 9 / 5 },
+  { name: "Ni3", ratio: 15 / 8 },
+  { name: "Sa↑", ratio: 2.0 }, // next Sa (for boundary)
+];
+
+/** Map frequency -> { swaraName, sthayi, cents }
+ * - Normalizes freq to the nearest octave around Sa
+ * - Finds nearest swarasthana by smallest cents difference
+ * - Computes sthayi from octave offset
+ */
+function frequencyToCarnatic(freq, saFreq = SA_FREQ) {
+  if (!freq || freq <= 0) return null;
+
+  // relative ratio to Sa
+  let rel = freq / saFreq;
+  let octave = 0;
+  // bring into [1, 2)
+  while (rel < 1) {
+    rel *= 2;
+    octave -= 1;
   }
+  while (rel >= 2) {
+    rel /= 2;
+    octave += 1;
+  }
+
+  // find nearest swara by cents distance
+  let best = null;
+  for (const sw of SWARAS) {
+    const cents = 1200 * Math.log2(rel / sw.ratio); // + = sharp, - = flat
+    const abs = Math.abs(cents);
+    if (!best || abs < best.abs) best = { name: sw.name, cents, abs };
+  }
+  // choose sthayi name based on octave shift
+  const sthayi =
+    octave <= -2
+      ? "Anumandra"
+      : octave === -1
+      ? "Mandra"
+      : octave === 0
+      ? "Madhya"
+      : octave === 1
+      ? "Tara"
+      : "Athi Tara";
+
+  // if nearest is the top "Sa↑", call it "Sa" but with sthayi one higher
+  let swaraName = best.name;
+  let sthayiAdj = sthayi;
+  if (swaraName === "Sa↑") {
+    swaraName = "Sa";
+    // bump sthayi by one (since it's the upper Sa)
+    sthayiAdj =
+      sthayi === "Anumandra"
+        ? "Mandra"
+        : sthayi === "Mandra"
+        ? "Madhya"
+        : sthayi === "Madhya"
+        ? "Tara"
+        : "Athi Tara";
+  }
+
+  return {
+    swaraName,
+    sthayi: sthayiAdj,
+    cents: Math.round(best.cents), // integer cents
+  };
 }
 
 export default function UploadPitch() {
-  // React component
-  const [isRecording, setIsRecording] = useState(false); // Recording state
-  const [status, setStatus] = useState("Idle"); // Status message
-  const [freq, setFreq] = useState(null); // Detected frequency
-  const [audioURL, setAudioURL] = useState(null); // Audio playback URL
+  const [isRecording, setIsRecording] = useState(false);
+  const [status, setStatus] = useState("Idle");
+  const [freq, setFreq] = useState(null);
+  const [note, setNote] = useState(null); // {swaraName, sthayi, cents}
+  const [audioURL, setAudioURL] = useState(null);
 
-  const audioCtxRef = useRef(null); // AudioContext reference
-  const sourceRef = useRef(null); // MediaStreamAudioSourceNode reference
-  const processorRef = useRef(null); // ScriptProcessorNode reference
-  const chunksRef = useRef([]); // Float32 chunks
-  const sampleRateRef = useRef(44100); // Sample rate
+  const audioCtxRef = useRef(null);
+  const sourceRef = useRef(null);
+  const processorRef = useRef(null);
+  const chunksRef = useRef([]);
+  const sampleRateRef = useRef(44100);
 
   async function start() {
-    // Start recording
-    setStatus("Requesting mic…"); // Update status
+    setStatus("Requesting mic…");
     const stream = await navigator.mediaDevices.getUserMedia({
-      // Request mic access
       audio: {
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
-      }, // audio only
+      },
     });
 
-    const AudioCtx = window.AudioContext || window.webkitAudioContext; // cross-browser
-    const audioCtx = new AudioCtx(); // Create AudioContext
-    audioCtxRef.current = audioCtx; // store in ref
-    sampleRateRef.current = audioCtx.sampleRate; // store sample rate
+    const ACtx = window.AudioContext || window.webkitAudioContext;
+    const audioCtx = new ACtx();
+    audioCtxRef.current = audioCtx;
+    sampleRateRef.current = audioCtx.sampleRate;
 
-    const source = audioCtx.createMediaStreamSource(stream); // Create MediaStream source
-    sourceRef.current = source; // store in ref
+    const source = audioCtx.createMediaStreamSource(stream);
+    sourceRef.current = source;
 
-    // Use ScriptProcessor (simple, widely supported) or AudioWorklet (modern, more complex)
-    const processor = audioCtx.createScriptProcessor(4096, 1, 1); // bufferSize, inCh, outCh
-    processorRef.current = processor; // store in ref
+    const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    processorRef.current = processor;
 
-    chunksRef.current = []; // reset chunks
-
+    chunksRef.current = [];
     processor.onaudioprocess = (e) => {
-      // mono
       const ch0 = e.inputBuffer.getChannelData(0);
-      // copy into our own Float32Array (detach from internal buffer)
       chunksRef.current.push(new Float32Array(ch0));
     };
 
-    source.connect(processor); // connect source to processor
-    processor.connect(audioCtx.destination); // required in some browsers
-    setIsRecording(true); // update state
-    setStatus("Recording… Speak now (click Stop to analyze)."); // update status
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+    setIsRecording(true);
+    setStatus("Recording… Speak/sing, then click Stop & Analyze.");
   }
 
   async function stopAndUpload() {
-    setIsRecording(false); // update state
-    setStatus("Processing…"); // update status
+    setIsRecording(false);
+    setStatus("Processing…");
 
-    // stop nodes
     try {
-      processorRef.current.disconnect(); // stop processing
+      processorRef.current.disconnect();
     } catch {}
     try {
-      sourceRef.current.disconnect(); // stop source
+      sourceRef.current.disconnect();
     } catch {}
     try {
-      await audioCtxRef.current.close(); // close AudioContext
+      await audioCtxRef.current.close();
     } catch {}
 
-    // merge Float32 chunks
-    const chunks = chunksRef.current; // get chunks
-    const totalLen = chunks.reduce((a, b) => a + b.length, 0); // total length
-    const merged = new Float32Array(totalLen); // merged array
-    let offset = 0; // current offset
+    const chunks = chunksRef.current;
+    const totalLen = chunks.reduce((a, b) => a + b.length, 0);
+    const merged = new Float32Array(totalLen);
+    let offset = 0;
     for (const c of chunks) {
-      // for each chunk
-      merged.set(c, offset); // copy chunk
-      offset += c.length; // update offset
+      merged.set(c, offset);
+      offset += c.length;
     }
 
-    // encode mono 16-bit WAV
-    const wavBlob = encodeWavMono(merged, sampleRateRef.current); // encode to WAV
-    setAudioURL(URL.createObjectURL(wavBlob)); // optional: playback
+    const wavBlob = encodeWavMono(merged, sampleRateRef.current);
+    setAudioURL(URL.createObjectURL(wavBlob));
 
-    // send to Node API
-    const form = new FormData(); // create form data
-    form.append("file", wavBlob, "recording.wav"); // append WAV file
+    const form = new FormData();
+    form.append("file", wavBlob, "recording.wav");
 
     try {
       const resp = await fetch("http://localhost:3000/pitch", {
         method: "POST",
         body: form,
-      }); // send to backend
-      const json = await resp.json(); // parse JSON
-      setFreq(json.frequency ?? null); // update frequency
-      setStatus("Done"); // update status
+      });
+      const json = await resp.json();
+      const f = json.frequency ?? null;
+      setFreq(f);
+      setStatus("Done");
+
+      const mapping = frequencyToCarnatic(f, SA_FREQ);
+      setNote(mapping);
     } catch (e) {
       console.error(e);
-      setStatus("Upload failed"); // update status
+      setStatus("Upload failed");
+      setFreq(null);
+      setNote(null);
     }
   }
 
   return (
-    <div style={{ fontFamily: "system-ui", padding: 16, maxWidth: 520 }}>
-      <h2>Record & Analyze (server)</h2>
+    <div style={{ fontFamily: "system-ui", padding: 16, maxWidth: 560 }}>
+      <h2>Record & Analyze (Carnatic)</h2>
       <p style={{ opacity: 0.8 }}>{status}</p>
 
       <div style={{ display: "flex", gap: 8 }}>
@@ -167,8 +231,21 @@ export default function UploadPitch() {
         </button>
       </div>
 
-      <div style={{ marginTop: 16, fontSize: 24, fontWeight: 700 }}>
-        {freq ? `${Math.round(freq)} Hz` : "—"}
+      <div style={{ marginTop: 16, lineHeight: 1.6 }}>
+        <div>
+          <strong>Detected Frequency:</strong>{" "}
+          {freq ? `${Math.round(freq)} Hz` : "—"}
+        </div>
+        <div>
+          <strong>Sa (Madhya) set to:</strong> {SA_FREQ} Hz
+        </div>
+        <div>
+          <strong>Nearest Shruti:</strong>{" "}
+          {note ? `${note.swaraName} (${note.sthayi})` : "—"}
+          {note && Math.abs(note.cents) <= 50
+            ? `  (${note.cents >= 0 ? "+" : ""}${note.cents}¢)`
+            : ""}
+        </div>
       </div>
 
       {audioURL && (
@@ -176,10 +253,6 @@ export default function UploadPitch() {
           <audio controls src={audioURL}></audio>
         </div>
       )}
-
-      <p style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
-        Tip: Mic works on HTTPS or <code>localhost</code>.
-      </p>
     </div>
   );
 }
