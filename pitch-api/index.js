@@ -1,29 +1,35 @@
 // index.js
-const express = require("express");
-const multer = require("multer");
-const cors = require("cors");
-const { decode } = require("wav-decoder");
-const Pitchfinder = require("pitchfinder");
+const express = require("express"); // express → Web server framework
+const multer = require("multer"); // multer → Middleware for handling multipart/form-data (file uploads)
+const cors = require("cors"); // cors → Cross-Origin Resource Sharing from frontend port 5173 to backend port 3000
+const { decode } = require("wav-decoder"); // wav-decoder → Decode WAV files
+const Pitchfinder = require("pitchfinder"); // pitchfinder → Pitch detection algorithm (YIN in this case)
 
-const app = express();
-app.use(cors());
+const app = express(); // Create an Express application
+app.use(cors()); // Enable CORS for all routes
 
-const upload = multer({ storage: multer.memoryStorage() });
+// Configure multer for file uploads
+const upload = multer({ storage: multer.memoryStorage() }); // Use memory storage for uploaded files
 
 app.get("/", (req, res) => {
-  res.send("Server running. POST /pitch with a WAV file.");
+  res.send("Server running. POST /pitch with a WAV file."); // Simple route to check if server is running
 });
 
 app.post("/pitch", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" }); // Check if a file was uploaded
 
-    const audioData = await decode(req.file.buffer);
-    const samples = audioData.channelData[0];
-    const sampleRate = audioData.sampleRate;
+    // Decode the WAV file
 
-    const detectPitch = Pitchfinder.YIN({ sampleRate });
-    const frequency = detectPitch(samples) || null;
+    const audioData = await decode(req.file.buffer); // Decode the uploaded WAV file from buffer
+    const samples = audioData.channelData[0]; // Use the first channel for pitch detection
+    const sampleRate = audioData.sampleRate; // Get the sample rate from the audio data
+
+    // Detect pitch using YIN algorithm
+    const detectPitch = Pitchfinder.YIN({ sampleRate }); // Initialize YIN pitch detector with the sample rate
+    const frequency = detectPitch(samples) || null; // Detect pitch from the audio samples
+
+    // Return the detected frequency
 
     res.json({ frequency });
   } catch (err) {
@@ -32,5 +38,5 @@ app.post("/pitch", upload.single("file"), async (req, res) => {
   }
 });
 
-const PORT = 3000;
-app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`));
+const PORT = 3000; // Define the port to run the server
+app.listen(PORT, () => console.log(`Listening on http://localhost:${PORT}`)); // Start the server and listen on the defined port
